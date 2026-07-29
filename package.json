@@ -2,6 +2,9 @@
   "name": "product-selector-app",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
@@ -10,7 +13,8 @@
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",
-    "vite": "^5.0.0"
+    "vite": "^4.5.3",
+    "@rollup/rollup-linux-x64-gnu": "4.9.6"
   },
   "scripts": {
     "dev": "vite",

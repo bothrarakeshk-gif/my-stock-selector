@@ -20,6 +20,17 @@ jobs:
         with:
           submodules: true
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Clean install dependencies
+        run: |
+          rm -f package-lock.json
+          rm -rf node_modules
+          npm install
+
       - name: Build and Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
