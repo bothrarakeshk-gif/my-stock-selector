@@ -1,92 +1,67 @@
-using System;
-using System.IO;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.AspNetCore.Http;
+using System.Net;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Azure.Storage.Blobs;
-using Azure;
 
 namespace ProductSelector.Functions
 {
-    /// <summary>
-    /// Retrieves a previously saved product selection from Azure Blob Storage.
-    /// Blob path: selections/{codename}.json
-    ///
-    /// Required App Settings:
-    ///   AzureWebJobsStorage  — connection string for your storage account
-    ///   BlobContainerName    — container name, e.g. "product-selections"
-    ///
-    /// GET /api/selections/{codename}
-    ///
-    /// Response 200:
-    /// {
-    ///   "codename": "my-config",
-    ///   "selectedProducts": ["prod-1", "prod-3"],
-    ///   "savedAt": "2026-07-29T..."
-    /// }
-    ///
-    /// Response 404 — no saved selection for that codename.
-    /// </summary>
-    public static class GetSelection
+    public class GetSelection
     {
-        [FunctionName("GetSelection")]
-        public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "options", Route = "selections/{codename}")] HttpRequest req,
-            string codename,
-            ILogger log)
+        private readonly ILogger _logger;
+
+        public GetSelection(ILoggerFactory loggerFactory)
         {
-            log.LogInformation("GetSelection triggered for codename '{Codename}'.", codename);
+            _logger = loggerFactory.CreateLogger<GetSelection>();
+        }
 
-            // ── CORS ──────────────────────────────────────────────────────────
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Origin",  "*");
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
+        [Function("GetSelection")]
+        public async Task<HttpResponseData> Run(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "options", Route = "selections/{codename}")] HttpRequestData req,
+            string codename)
+        {
+            // CORS
+            if (req.Method.ToUpper() == "OPTIONS")
+            {
+                var cors = req.CreateResponse(HttpStatusCode.OK);
+                cors.Headers.Add("Access-Control-Allow-Origin",  "*");
+                cors.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
+                cors.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
+                return cors;
+            }
 
-            if (req.Method == HttpMethods.Options)
-                return new OkResult();
+            var response = req.CreateResponse();
+            response.Headers.Add("Access-Control-Allow-Origin", "*");
+            response.Headers.Add("Content-Type", "application/json");
 
             if (string.IsNullOrWhiteSpace(codename))
-                return new BadRequestObjectResult(new { error = "Codename is required." });
-
-            string safeName = SanitiseCodename(codename);
-
-            // ── Read from blob ────────────────────────────────────────────────
-            string connStr       = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-            string containerName = Environment.GetEnvironmentVariable("BlobContainerName") ?? "product-selections";
-
-            var containerClient = new BlobContainerClient(connStr, containerName);
-            string blobName     = $"selections/{safeName}.json";
-            var blobClient      = containerClient.GetBlobClient(blobName);
-
-            bool exists = await blobClient.ExistsAsync();
-            if (!exists)
             {
-                log.LogInformation("No selection found for codename '{Codename}'.", codename);
-                return new NotFoundObjectResult(new { error = $"No saved selection found for codename '{codename}'." });
+                response.StatusCode = HttpStatusCode.BadRequest;
+                await response.WriteStringAsync(JsonConvert.SerializeObject(new { error = "Codename is required." }));
+                return response;
+            }
+
+            string safeName    = SanitiseCodename(codename);
+            string connStr     = Environment.GetEnvironmentVariable("AzureWebJobsStorage")!;
+            string container   = Environment.GetEnvironmentVariable("BlobContainerName") ?? "product-selections";
+
+            var containerClient = new BlobContainerClient(connStr, container);
+            var blobClient      = containerClient.GetBlobClient($"selections/{safeName}.json");
+
+            if (!await blobClient.ExistsAsync())
+            {
+                response.StatusCode = HttpStatusCode.NotFound;
+                await response.WriteStringAsync(JsonConvert.SerializeObject(new { error = $"No saved selection found for '{codename}'." }));
+                return response;
             }
 
             var download = await blobClient.DownloadContentAsync();
             string json  = download.Value.Content.ToString();
 
-            SelectionRecord record;
-            try
-            {
-                record = JsonConvert.DeserializeObject<SelectionRecord>(json);
-            }
-            catch (Exception ex)
-            {
-                log.LogError(ex, "Failed to deserialise stored blob for codename '{Codename}'.", codename);
-                return new StatusCodeResult(500);
-            }
-
-            log.LogInformation("Returning selection for '{Codename}' ({Count} products).",
-                codename, record?.SelectedProducts?.Length ?? 0);
-
-            return new OkObjectResult(record);
+            response.StatusCode = HttpStatusCode.OK;
+            await response.WriteStringAsync(json);
+            return response;
         }
 
         private static string SanitiseCodename(string name) =>

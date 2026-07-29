@@ -1,10 +1,6 @@
-using System;
-using System.IO;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.AspNetCore.Http;
+using System.Net;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Azure.Storage.Blobs;
@@ -12,63 +8,52 @@ using System.Text;
 
 namespace ProductSelector.Functions
 {
-    /// <summary>
-    /// Saves the current product selection (codename + selected product IDs) to Azure Blob Storage.
-    /// Blob path: selections/{codename}.json
-    ///
-    /// Required App Settings:
-    ///   AzureWebJobsStorage  — connection string for your storage account
-    ///   BlobContainerName    — container name, e.g. "product-selections"
-    ///
-    /// Request body (JSON):
-    /// {
-    ///   "codename": "my-config",
-    ///   "selectedProducts": ["prod-1", "prod-3", "prod-7"]
-    /// }
-    ///
-    /// Response (200 OK):
-    /// { "success": true, "codename": "my-config", "savedAt": "2026-07-29T..." }
-    /// </summary>
-    public static class SaveSelection
+    public class SaveSelection
     {
-        [FunctionName("SaveSelection")]
-        public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "selections")] HttpRequest req,
-            ILogger log)
+        private readonly ILogger _logger;
+
+        public SaveSelection(ILoggerFactory loggerFactory)
         {
-            log.LogInformation("SaveSelection triggered.");
+            _logger = loggerFactory.CreateLogger<SaveSelection>();
+        }
 
-            // ── CORS ──────────────────────────────────────────────────────────
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Origin",  "*");
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Methods", "POST, OPTIONS");
-            req.HttpContext.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
-
-            if (req.Method == HttpMethods.Options)
-                return new OkResult();
-
-            // ── Parse body ────────────────────────────────────────────────────
-            string requestBody;
-            using (var reader = new StreamReader(req.Body))
-                requestBody = await reader.ReadToEndAsync();
-
-            SaveSelectionRequest payload;
-            try
+        [Function("SaveSelection")]
+        public async Task<HttpResponseData> Run(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "selections")] HttpRequestData req)
+        {
+            // CORS
+            if (req.Method.ToUpper() == "OPTIONS")
             {
-                payload = JsonConvert.DeserializeObject<SaveSelectionRequest>(requestBody);
+                var cors = req.CreateResponse(HttpStatusCode.OK);
+                cors.Headers.Add("Access-Control-Allow-Origin",  "*");
+                cors.Headers.Add("Access-Control-Allow-Methods", "POST, OPTIONS");
+                cors.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
+                return cors;
             }
-            catch (Exception ex)
+
+            var response = req.CreateResponse();
+            response.Headers.Add("Access-Control-Allow-Origin", "*");
+
+            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+
+            SaveSelectionRequest? payload;
+            try { payload = JsonConvert.DeserializeObject<SaveSelectionRequest>(requestBody); }
+            catch
             {
-                log.LogError(ex, "Failed to deserialise request body.");
-                return new BadRequestObjectResult(new { error = "Invalid JSON body." });
+                response.StatusCode = HttpStatusCode.BadRequest;
+                await response.WriteStringAsync(JsonConvert.SerializeObject(new { error = "Invalid JSON body." }));
+                return response;
             }
 
             if (string.IsNullOrWhiteSpace(payload?.Codename))
-                return new BadRequestObjectResult(new { error = "Codename is required." });
+            {
+                response.StatusCode = HttpStatusCode.BadRequest;
+                await response.WriteStringAsync(JsonConvert.SerializeObject(new { error = "Codename is required." }));
+                return response;
+            }
 
-            // Sanitise codename so it is safe as a blob name
             string safeName = SanitiseCodename(payload.Codename);
 
-            // ── Build payload to store ────────────────────────────────────────
             var record = new SelectionRecord
             {
                 Codename         = payload.Codename,
@@ -76,56 +61,42 @@ namespace ProductSelector.Functions
                 SavedAt          = DateTime.UtcNow
             };
 
-            string json = JsonConvert.SerializeObject(record, Formatting.Indented);
+            string json        = JsonConvert.SerializeObject(record, Formatting.Indented);
+            string connStr     = Environment.GetEnvironmentVariable("AzureWebJobsStorage")!;
+            string container   = Environment.GetEnvironmentVariable("BlobContainerName") ?? "product-selections";
 
-            // ── Write to blob ─────────────────────────────────────────────────
-            string connStr       = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-            string containerName = Environment.GetEnvironmentVariable("BlobContainerName") ?? "product-selections";
-
-            var containerClient = new BlobContainerClient(connStr, containerName);
+            var containerClient = new BlobContainerClient(connStr, container);
             await containerClient.CreateIfNotExistsAsync();
 
-            string blobName = $"selections/{safeName}.json";
-            var blobClient  = containerClient.GetBlobClient(blobName);
-
+            var blobClient = containerClient.GetBlobClient($"selections/{safeName}.json");
             using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
             await blobClient.UploadAsync(stream, overwrite: true);
 
-            log.LogInformation("Saved selection '{Codename}' → blob '{BlobName}'.", payload.Codename, blobName);
-
-            return new OkObjectResult(new
+            response.StatusCode = HttpStatusCode.OK;
+            response.Headers.Add("Content-Type", "application/json");
+            await response.WriteStringAsync(JsonConvert.SerializeObject(new
             {
                 success  = true,
                 codename = payload.Codename,
                 savedAt  = record.SavedAt
-            });
+            }));
+            return response;
         }
 
-        // Replace characters that are invalid in blob names
         private static string SanitiseCodename(string name) =>
             System.Text.RegularExpressions.Regex.Replace(name.Trim().ToLowerInvariant(), @"[^a-z0-9\-_]", "-");
     }
 
-    // ── DTOs ──────────────────────────────────────────────────────────────────
-
     public class SaveSelectionRequest
     {
-        [JsonProperty("codename")]
-        public string Codename { get; set; }
-
-        [JsonProperty("selectedProducts")]
-        public string[] SelectedProducts { get; set; }
+        [JsonProperty("codename")]          public string?   Codename         { get; set; }
+        [JsonProperty("selectedProducts")]  public string[]? SelectedProducts { get; set; }
     }
 
     public class SelectionRecord
     {
-        [JsonProperty("codename")]
-        public string Codename { get; set; }
-
-        [JsonProperty("selectedProducts")]
-        public string[] SelectedProducts { get; set; }
-
-        [JsonProperty("savedAt")]
-        public DateTime SavedAt { get; set; }
+        [JsonProperty("codename")]          public string    Codename         { get; set; } = "";
+        [JsonProperty("selectedProducts")]  public string[]  SelectedProducts { get; set; } = Array.Empty<string>();
+        [JsonProperty("savedAt")]           public DateTime  SavedAt          { get; set; }
     }
 }
