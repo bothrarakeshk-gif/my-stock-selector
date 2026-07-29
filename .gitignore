@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Azure Functions build output
+api/bin/
+api/obj/
+
+# Local settings (contains connection strings — never commit!)
+api/local.settings.json
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
